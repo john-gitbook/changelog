@@ -1,0 +1,186 @@
+name: Update Summary
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  push:  # Triggers on any push to any branch
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  update-summary:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Debug and Update SUMMARY.md
+      run: |
+        echo "=== DEBUGGING INFO ==="
+        echo "Current directory:"
+        pwd
+        echo "Directory contents:"
+        ls -la
+        echo "Looking for SUMMARY.md files:"
+        find . -name "SUMMARY.md" -type f
+        echo "All .md files:"
+        find . -name "*.md" -type f
+        echo "======================="
+        
+        python3 << 'EOF'
+        import os
+        import re
+        from pathlib import Path
+
+        def format_title(filename):
+            """Convert filename to a readable title"""
+            title = filename.replace('.md', '').replace('-', ' ').replace('_', ' ')
+            return ' '.join(word.capitalize() for word in title.split())
+
+        def find_summary_file():
+            """Find SUMMARY.md in root or docs directory"""
+            possible_paths = [
+                Path('SUMMARY.md'),
+                Path('docs/SUMMARY.md'),
+                Path('./docs/SUMMARY.md')
+            ]
+            
+            for path in possible_paths:
+                if path.exists():
+                    print(f"Found SUMMARY.md at: {path}")
+                    return path
+            
+            # If not found, create in root
+            print("SUMMARY.md not found, creating in root directory")
+            return Path('SUMMARY.md')
+
+        def get_markdown_files():
+            """Get all markdown files except SUMMARY.md and README.md"""
+            md_files = []
+            for file in Path('.').rglob('*.md'):
+                if (file.name.lower() not in ['summary.md', 'readme.md'] and 
+                    not any(part.startswith('.') for part in file.parts)):
+                    md_files.append(file)
+            return sorted(md_files)
+
+        def update_summary():
+            """Update SUMMARY.md with new entries"""
+            summary_path = find_summary_file()
+            
+            # Create SUMMARY.md if it doesn't exist
+            if not summary_path.exists():
+                summary_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(summary_path, 'w') as f:
+                    f.write('# Table of Contents\n\n')
+                print(f"Created new SUMMARY.md at {summary_path}")
+            
+            # Read current content
+            with open(summary_path, 'r') as f:
+                content = f.read()
+            
+            print(f"Current SUMMARY.md content:\n{content}")
+            
+            # Find existing entries
+            existing_entries = set()
+            for line in content.split('\n'):
+                match = re.search(r'\[.*?\]\((.*?)\)', line)
+                if match:
+                    existing_entries.add(match.group(1))
+            
+            print(f"Existing entries: {existing_entries}")
+            
+            # Get all markdown files
+            md_files = get_markdown_files()
+            print(f"All markdown files found: {[str(f) for f in md_files]}")
+            
+            # Find new files
+            new_files = []
+            for file in md_files:
+                # Calculate relative path from SUMMARY.md location
+                try:
+                    if summary_path.name == 'SUMMARY.md' and summary_path.parent.name != '.':
+                        # SUMMARY.md is in a subdirectory (like docs/)
+                        file_path = os.path.relpath(file, summary_path.parent)
+                    else:
+                        # SUMMARY.md is in root
+                        file_path = str(file)
+                    
+                    file_path = file_path.replace('\\', '/')  # Normalize separators
+                    
+                    if file_path not in existing_entries:
+                        new_files.append((file, file_path))
+                except:
+                    # Fallback to absolute path
+                    file_path = str(file).replace('\\', '/')
+                    if file_path not in existing_entries:
+                        new_files.append((file, file_path))
+            
+            if not new_files:
+                print("No new files to add to SUMMARY.md")
+                return False
+            
+            # Prepare new entries
+            new_entries = []
+            for file, file_path in new_files:
+                title = format_title(file.name)
+                entry = f"* [{title}]({file_path})"
+                new_entries.append(entry)
+                print(f"Will add: {entry}")
+            
+            # Update content
+            lines = content.split('\n')
+            
+            # Find where to insert (after "# Table of Contents" or similar)
+            insert_index = 1
+            for i, line in enumerate(lines):
+                if (line.strip().lower().startswith('# table of contents') or 
+                    line.strip().startswith('# Table of Contents') or
+                    line.strip().startswith('# Summary')):
+                    insert_index = i + 1
+                    # Skip empty lines
+                    while insert_index < len(lines) and lines[insert_index].strip() == '':
+                        insert_index += 1
+                    break
+            
+            # Insert new entries
+            for entry in reversed(new_entries):
+                lines.insert(insert_index, entry)
+            
+            # Write updated content
+            with open(summary_path, 'w') as f:
+                f.write('\n'.join(lines))
+            
+            print(f"Updated SUMMARY.md with {len(new_entries)} new entries")
+            print(f"New content:\n{chr(10).join(lines)}")
+            
+            return True
+
+        # Run the update
+        try:
+            changes_made = update_summary()
+            with open(os.environ['GITHUB_ENV'], 'a') as f:
+                f.write(f"CHANGES_MADE={'true' if changes_made else 'false'}\n")
+        except Exception as e:
+            print(f"Error: {e}")
+            with open(os.environ['GITHUB_ENV'], 'a') as f:
+                f.write(f"CHANGES_MADE=false\n")
+        EOF
+
+    - name: Commit changes
+      if: env.CHANGES_MADE == 'true'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add SUMMARY.md
+        git commit -m "Auto-update SUMMARY.md with new pages" || exit 0
+        git push
